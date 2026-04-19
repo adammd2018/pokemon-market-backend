@@ -9,18 +9,52 @@ const port = process.env.PORT || 8787
 const pokemonApiBase = 'https://api.pokemontcg.io/v2'
 const pokeApiBase = 'https://pokeapi.co/api/v2'
 
-app.use(cors({
-  origin: [
-    'https://pokeinvest.tritownrevival.org',
-    'https://www.pokeinvest.tritownrevival.org',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-  ],
+const allowedExactOrigins = new Set([
+  'https://pokeinvest.tritownrevival.org',
+  'https://www.pokeinvest.tritownrevival.org',
+  'https://tritownrevival.org',
+  'https://www.tritownrevival.org',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+])
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true
+
+  if (allowedExactOrigins.has(origin)) return true
+
+  try {
+    const url = new URL(origin)
+    const host = url.hostname.toLowerCase()
+
+    if (host === 'tritownrevival.org' || host.endsWith('.tritownrevival.org')) {
+      return true
+    }
+
+    if (host.endsWith('.dreamhosters.com')) {
+      return true
+    }
+
+    return false
+  } catch {
+    return false
+  }
+}
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (isAllowedOrigin(origin)) {
+      callback(null, true)
+    } else {
+      callback(new Error(`CORS blocked for origin: ${origin}`))
+    }
+  },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-}))
+}
 
-app.options('*', cors())
+app.use(cors(corsOptions))
+app.options('*', cors(corsOptions))
 app.use(express.json())
 
 const fallbackSets = []
@@ -100,12 +134,12 @@ const pokemonAliasMap = {
   'chienpao': 'chien-pao',
   'tinglu': 'ting-lu',
   'chiyu': 'chi-yu',
-
   'wo-chien': 'wo-chien',
   'chien-pao': 'chien-pao',
   'ting-lu': 'ting-lu',
   'chi-yu': 'chi-yu',
 }
+
 function getHeaders() {
   const headers = { Accept: 'application/json' }
   if (process.env.POKEMONTCG_API_KEY) {
