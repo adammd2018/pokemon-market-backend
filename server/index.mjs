@@ -8,18 +8,16 @@ const app = express()
 const port = process.env.PORT || 8787
 const pokemonApiBase = 'https://api.pokemontcg.io/v2'
 
-// ✅ CORS FIX (DreamHost frontend → Render backend)
 app.use(cors({
   origin: [
-    "https://pokeinvest.tritownrevival.org",
-    "https://www.pokeinvest.tritownrevival.org"
+    'https://pokeinvest.tritownrevival.org',
+    'https://www.pokeinvest.tritownrevival.org',
   ],
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 
-app.options("*", cors())
-
+app.options('*', cors())
 app.use(express.json())
 
 const fallbackSets = []
@@ -216,11 +214,136 @@ function scoreCard(card) {
   }
 }
 
+function sortSetsNewestFirst(sets) {
+  return [...sets].sort((a, b) => parseDate(b.releaseDate) - parseDate(a.releaseDate))
+}
+
+async function fetchRecentSets(limit = 8) {
+  try {
+    const data = await safeJson(`${pokemonApiBase}/sets?pageSize=50&orderBy=-releaseDate`)
+    return sortSetsNewestFirst(data.data || []).slice(0, limit)
+  } catch {
+    return fallbackSets
+  }
+}
+
+function classifySetStatus(releaseDate) {
+  const time = parseDate(releaseDate)
+  if (!time) return 'unknown'
+  const now = Date.now()
+  return time > now ? 'upcoming' : 'released'
+}
+
+async function fetchCardsForSet(setId, pageSize = 40) {
+  try {
+    const query = encodeURIComponent(`set.id:${setId}`)
+    const select = encodeURIComponent('id,name,number,rarity,set,images,tcgplayer')
+    const data = await safeJson(
+      `${pokemonApiBase}/cards?q=${query}&pageSize=${pageSize}&orderBy=-set.releaseDate&select=${select}`,
+    )
+    return data.data || []
+  } catch {
+    return fallbackCards.filter((card) => card.set.id === setId)
+  }
+}
+
+function pickTopCandidates(cards, max = 6) {
+  return cards
+    .map((card) => ({ ...card, model: scoreCard(card) }))
+    .sort((a, b) => {
+      const aHasPricing = a.model.pricing ? 1 : 0
+      const bHasPricing = b.model.pricing ? 1 : 0
+      if (bHasPricing !== aHasPricing) return bHasPricing - aHasPricing
+      return b.model.score - a.model.score || ((b.model.pricing?.market || 0) - (a.model.pricing?.market || 0))
+    })
+    .slice(0, max)
+}
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
 
-// (rest of your routes stay the same)
+app.get('/api/release-radar', async (_req, res) => {
+  const sets = await fetchRecentSets(8)
+  const cardsBySet = await Promise.all(
+    sets.map(async (set) => {
+      const cards = await fetchCardsForSet(set.id, 40)
+      return {
+        set: { ...set, status: classifySetStatus(set.releaseDate) },
+        candidates: pickTopCandidates(cards, 5),
+      }
+    }),
+  )
+
+  const usedFallback = sets.length === 0
+  res.json({
+    source: usedFallback ? 'fallback cards only' : 'pokemontcg.io live data',
+    generatedAt: new Date().toISOString(),
+    fallback: usedFallback,
+    sets: cardsBySet,
+  })
+})
+
+app.get('/api/card-search', async (req, res) => {
+  const term = String(req.query.q || '').trim()
+  if (!term) {
+    return res.status(400).json({ error: 'Missing q query parameter.' })
+  }
+
+  try {
+    const query = encodeURIComponent(`name:"${term}" OR name:${term}`)
+    const select = encodeURIComponent('id,name,number,rarity,set,images,tcgplayer')
+    const data = await safeJson(
+      `${pokemonApiBase}/cards?q=${query}&pageSize=20&orderBy=-set.releaseDate&select=${select}`,
+    )
+
+    const results = (data.data || [])
+      .map((card) => ({ ...card, model: scoreCard(card) }))
+      .sort((a, b) => {
+        const aHasPricing = a.model.pricing ? 1 : 0
+        const bHasPricing = b.model.pricing ? 1 : 0
+        if (bHasPricing !== aHasPricing) return bHasPricing - aHasPricing
+        return b.model.score - a.model.score
+      })
+
+    res.json({ results })
+  } catch {
+    const results = fallbackCards
+      .filter((card) => card.name.toLowerCase().includes(term.toLowerCase()))
+      .map((card) => ({ ...card, model: scoreCard(card) }))
+
+    res.json({ results, fallback: true })
+  }
+})
+
+app.get('/api/predict', async (req, res) => {
+  const { q } = req.query
+  const term = String(q || '').trim()
+  let card = null
+
+  if (term) {
+    try {
+      const query = encodeURIComponent(`name:"${term}" OR name:${term}`)
+      const select = encodeURIComponent('id,name,number,rarity,set,images,tcgplayer')
+      const data = await safeJson(
+        `${pokemonApiBase}/cards?q=${query}&pageSize=10&orderBy=-set.releaseDate&select=${select}`,
+      )
+      card = (data.data || [])[0] || null
+    } catch {
+      card = fallbackCards.find((entry) => entry.name.toLowerCase().includes(term.toLowerCase())) || null
+    }
+  }
+
+  if (!card) {
+    return res.status(404).json({ error: 'No card matched that search.' })
+  }
+
+  res.json({
+    card,
+    model: scoreCard(card),
+    generatedAt: new Date().toISOString(),
+  })
+})
 
 app.listen(port, () => {
   console.log(`Pokemon Market AI server running on http://localhost:${port}`)
