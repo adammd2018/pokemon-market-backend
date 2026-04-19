@@ -1,14 +1,26 @@
 {
-  "name": "pokemon-market-backend",
-  "version": "1.0.0",
+  "name": "pokemon-market-ai",
+  "private": true,
+  "version": "0.0.2",
   "type": "module",
-  "main": "server/index.mjs",
   "scripts": {
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:client": "vite",
+    "dev:server": "node server/index.mjs",
+    "build": "vite build",
+    "preview": "vite preview",
     "start": "node server/index.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "vite": "^5.4.8"
   }
 }
