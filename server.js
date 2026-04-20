@@ -10,6 +10,9 @@ const PORT = process.env.PORT || 3001;
 const pokemonApiBase = "https://api.pokemontcg.io/v2";
 const pokeApiBase = "https://pokeapi.co/api/v2";
 
+const ANALYZER_SCAN_PAGES = Math.max(Number(process.env.ANALYZER_SCAN_PAGES || 5), 1);
+const ANALYZER_PAGE_SIZE = Math.min(Math.max(Number(process.env.ANALYZER_PAGE_SIZE || 50), 1), 250);
+
 function jsonHeaders(extra = {}) {
   const headers = { Accept: "application/json", ...extra };
   if (process.env.POKEMONTCG_API_KEY && process.env.POKEMONTCG_API_KEY.trim()) {
@@ -42,22 +45,34 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
+function numberOrNull(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toPriceBlock(card) {
+  return card?.tcgplayer?.prices?.holofoil
+    || card?.tcgplayer?.prices?.reverseHolofoil
+    || card?.tcgplayer?.prices?.normal
+    || null;
+}
+
 function toPrice(card) {
   return (
-    card?.tcgplayer?.prices?.holofoil?.market ??
-    card?.tcgplayer?.prices?.reverseHolofoil?.market ??
-    card?.tcgplayer?.prices?.normal?.market ??
-    card?.cardmarket?.prices?.avg30 ??
+    numberOrNull(card?.tcgplayer?.prices?.holofoil?.market) ??
+    numberOrNull(card?.tcgplayer?.prices?.reverseHolofoil?.market) ??
+    numberOrNull(card?.tcgplayer?.prices?.normal?.market) ??
+    numberOrNull(card?.cardmarket?.prices?.avg30) ??
     null
   );
 }
 
 function toRecentSale(card) {
   return (
-    card?.tcgplayer?.prices?.holofoil?.mid ??
-    card?.tcgplayer?.prices?.reverseHolofoil?.mid ??
-    card?.tcgplayer?.prices?.normal?.mid ??
-    card?.cardmarket?.prices?.avg7 ??
+    numberOrNull(card?.tcgplayer?.prices?.holofoil?.mid) ??
+    numberOrNull(card?.tcgplayer?.prices?.reverseHolofoil?.mid) ??
+    numberOrNull(card?.tcgplayer?.prices?.normal?.mid) ??
+    numberOrNull(card?.cardmarket?.prices?.avg7) ??
     null
   );
 }
@@ -70,7 +85,45 @@ function toImage(card) {
   return card?.images?.small || card?.images?.large || null;
 }
 
+function pctChange(current, previous) {
+  const c = numberOrNull(current);
+  const p = numberOrNull(previous);
+  if (c === null || p === null || p === 0) return null;
+  return Number((((c - p) / p) * 100).toFixed(2));
+}
+
+function estimateChanges(card) {
+  const market = toPrice(card);
+  const recent = toRecentSale(card);
+  const avg1 = numberOrNull(card?.cardmarket?.prices?.avg1);
+  const avg7 = numberOrNull(card?.cardmarket?.prices?.avg7);
+  const avg30 = numberOrNull(card?.cardmarket?.prices?.avg30);
+
+  // Prefer actual windows when present, otherwise fall back to best nearby reference.
+  const dailyChange = pctChange(
+    market ?? recent,
+    avg1 ?? recent ?? market
+  );
+
+  const weeklyChange = pctChange(
+    market ?? recent,
+    avg7 ?? recent ?? market
+  );
+
+  const monthlyChange = pctChange(
+    market ?? recent,
+    avg30 ?? avg7 ?? recent ?? market
+  );
+
+  return {
+    dailyChange,
+    weeklyChange,
+    monthlyChange
+  };
+}
+
 function normalizeCard(card) {
+  const changes = estimateChanges(card);
   return {
     id: card.id,
     name: card.name,
@@ -88,6 +141,9 @@ function normalizeCard(card) {
     image: toImage(card),
     marketPrice: toPrice(card),
     recentSale: toRecentSale(card),
+    dailyChange: changes.dailyChange,
+    weeklyChange: changes.weeklyChange,
+    monthlyChange: changes.monthlyChange,
     tcgplayerUrl: card?.tcgplayer?.url || null,
     cardmarketUrl: card?.cardmarket?.url || null
   };
@@ -121,12 +177,173 @@ async function getSets(params = {}) {
   return data.data || [];
 }
 
+async function scanCardsAcrossPages(baseParams = {}, pages = ANALYZER_SCAN_PAGES, pageSize = ANALYZER_PAGE_SIZE) {
+  const requests = [];
+  for (let page = 1; page <= pages; page += 1) {
+    requests.push(
+      getCards({
+        ...baseParams,
+        page,
+        pageSize
+      }).catch(() => [])
+    );
+  }
+  const chunks = await Promise.all(requests);
+  return chunks.flat();
+}
+
+function scoreCard(card) {
+  const market = typeof card.marketPrice === "number" ? card.marketPrice : 0;
+  const recent = typeof card.recentSale === "number" ? card.recentSale : 0;
+  const daily = typeof card.dailyChange === "number" ? card.dailyChange : 0;
+  const weekly = typeof card.weeklyChange === "number" ? card.weeklyChange : 0;
+  const monthly = typeof card.monthlyChange === "number" ? card.monthlyChange : 0;
+
+  let score = 50;
+
+  if (market >= 100) score += 18;
+  else if (market >= 50) score += 12;
+  else if (market >= 20) score += 8;
+  else if (market > 0) score += 3;
+
+  if (recent >= 100) score += 10;
+  else if (recent >= 50) score += 6;
+  else if (recent >= 20) score += 3;
+
+  if (weekly > 12) score += 10;
+  else if (weekly > 5) score += 6;
+  else if (weekly < -10) score -= 8;
+
+  if (monthly > 20) score += 10;
+  else if (monthly > 8) score += 6;
+  else if (monthly < -15) score -= 10;
+
+  if (daily > 10) score -= 3; // possible spike/chase risk
+
+  if (card.rarity && /secret|ultra|illustration|hyper|alternate|special/i.test(card.rarity)) score += 12;
+  if (card.setSeries && /scarlet|sword|sun|xy|black|diamond|platinum|neo|base/i.test(card.setSeries)) score += 4;
+  if (card.supertype && /pokemon/i.test(card.supertype)) score += 3;
+
+  return Math.max(1, Math.min(100, Math.round(score)));
+}
+
+function buildRecommendation(score, daily, weekly, monthly) {
+  if (score >= 82 && (weekly >= 0 || monthly >= 0)) return "Strong Buy";
+  if (score >= 70) return "Watch / Buy on Strength";
+  if (score >= 58) return "Hold / Watch";
+  if ((daily < -8 && weekly < -8) || monthly < -15) return "Sell / Avoid Weakness";
+  return "Speculative Watch";
+}
+
+function buildRiskLevel(card, score, daily, weekly, monthly) {
+  let risk = "Medium";
+  if (card.marketPrice && card.marketPrice >= 80 && Math.abs(weekly || 0) < 8 && Math.abs(monthly || 0) < 15) risk = "Low";
+  if (Math.abs(daily || 0) > 10 || Math.abs(weekly || 0) > 18 || Math.abs(monthly || 0) > 30) risk = "High";
+  if (!card.marketPrice) risk = "High";
+  if (score >= 80 && risk === "Medium") risk = "Medium";
+  return risk;
+}
+
+function buildLiquidityNote(card) {
+  if (typeof card.marketPrice === "number" && typeof card.recentSale === "number") {
+    if (Math.abs(card.marketPrice - card.recentSale) <= Math.max(2, card.marketPrice * 0.08)) {
+      return "Market price and recent sale are close, which suggests cleaner pricing and potentially better liquidity.";
+    }
+    return "Market price and recent sale are diverging, which can mean thinner or less stable liquidity.";
+  }
+  return "Liquidity confidence is limited because there is not enough recent pricing depth.";
+}
+
+function buildTrendNote(daily, weekly, monthly) {
+  const d = typeof daily === "number" ? daily : null;
+  const w = typeof weekly === "number" ? weekly : null;
+  const m = typeof monthly === "number" ? monthly : null;
+
+  if (w !== null && m !== null && w > 0 && m > 0) {
+    return "The card is showing positive momentum across both the weekly and monthly windows.";
+  }
+  if (d !== null && d > 8 && w !== null && w <= 0) {
+    return "The card may be experiencing a short-term spike without broader weekly confirmation.";
+  }
+  if (w !== null && w < 0 && m !== null && m < 0) {
+    return "The trend is weak across both the weekly and monthly windows.";
+  }
+  return "The trend is mixed and needs more confirmation before conviction increases.";
+}
+
+function buildGradingOutlook(card, score) {
+  if (card.marketPrice && card.marketPrice >= 100 && /secret|ultra|illustration|alternate|special/i.test(card.rarity || "")) {
+    return "Interesting grading candidate if condition is strong, because the value profile supports closer inspection.";
+  }
+  if (score >= 75 && typeof card.marketPrice === "number" && card.marketPrice >= 40) {
+    return "Worth checking for grading only if centering, edges, and surface quality are strong.";
+  }
+  return "Grading outlook is limited unless the raw condition is exceptional or the graded spread is unusually wide.";
+}
+
+function buildReasoning(card, score, recommendation) {
+  const parts = [];
+
+  if (typeof card.marketPrice === "number") {
+    parts.push(`Current market price is ${card.marketPrice.toFixed(2)}.`);
+  } else {
+    parts.push("Current market price is limited or unavailable.");
+  }
+
+  if (typeof card.weeklyChange === "number") {
+    parts.push(`Weekly change is ${card.weeklyChange.toFixed(2)}%.`);
+  }
+  if (typeof card.monthlyChange === "number") {
+    parts.push(`Monthly change is ${card.monthlyChange.toFixed(2)}%.`);
+  }
+
+  if (/secret|ultra|illustration|hyper|alternate|special/i.test(card.rarity || "")) {
+    parts.push("Rarity profile is stronger than average, which supports attention.");
+  }
+
+  parts.push(`Overall recommendation is ${recommendation}.`);
+  return parts.join(" ");
+}
+
+function buildAnalyzedCard(card) {
+  const score = scoreCard(card);
+  const daily = card.dailyChange;
+  const weekly = card.weeklyChange;
+  const monthly = card.monthlyChange;
+  const recommendation = buildRecommendation(score, daily, weekly, monthly);
+  const riskLevel = buildRiskLevel(card, score, daily, weekly, monthly);
+
+  return {
+    ...card,
+    aiScore: score,
+    aiLabel:
+      score >= 80 ? "Strong" :
+      score >= 60 ? "Moderate" :
+      "Speculative",
+    recommendation,
+    reasoning: buildReasoning(card, score, recommendation),
+    riskLevel,
+    gradingOutlook: buildGradingOutlook(card, score),
+    liquidityNote: buildLiquidityNote(card),
+    trendNote: buildTrendNote(daily, weekly, monthly)
+  };
+}
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "pokemon-market-backend",
     data_sources: [pokemonApiBase, pokeApiBase],
-    routes: ["/api/search", "/api/radar", "/api/analytics", "/api/education", "/api/education/:pokemon"]
+    analyzer_scan_pages: ANALYZER_SCAN_PAGES,
+    analyzer_page_size: ANALYZER_PAGE_SIZE,
+    routes: [
+      "/api/search",
+      "/api/radar",
+      "/api/analytics",
+      "/api/education",
+      "/api/education/:pokemon",
+      "/api/analyzer"
+    ]
   });
 });
 
@@ -338,6 +555,51 @@ app.get("/api/education/:pokemon", async (req, res) => {
   } catch (error) {
     res.status(error.status || 502).json({
       error: "education pokemon request failed",
+      details: error.body || error.message
+    });
+  }
+});
+
+app.get("/api/analyzer", async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  const setId = String(req.query.setId || "").trim();
+  const rarity = String(req.query.rarity || "").trim();
+
+  try {
+    let query = "";
+    if (q) {
+      const escaped = q.replace(/"/g, '\\"');
+      query += `name:"*${escaped}*"`;
+    }
+    if (setId) query += `${query ? " " : ""}set.id:${setId}`;
+    if (rarity) query += `${query ? " " : ""}rarity:"${rarity.replace(/"/g, '\\"')}"`;
+
+    const cards = await scanCardsAcrossPages(
+      {
+        q: query || undefined,
+        orderBy: "-set.releaseDate"
+      },
+      ANALYZER_SCAN_PAGES,
+      ANALYZER_PAGE_SIZE
+    );
+
+    const normalized = cards.map(normalizeCard);
+    const analyzed = normalized.map(buildAnalyzedCard).sort((a, b) => b.aiScore - a.aiScore);
+
+    res.json({
+      results: analyzed,
+      scannedCards: normalized.length,
+      scanPages: ANALYZER_SCAN_PAGES,
+      pageSize: ANALYZER_PAGE_SIZE,
+      query: {
+        q,
+        setId,
+        rarity
+      }
+    });
+  } catch (error) {
+    res.status(error.status || 502).json({
+      error: "analyzer request failed",
       details: error.body || error.message
     });
   }

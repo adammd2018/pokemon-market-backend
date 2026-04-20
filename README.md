@@ -1,20 +1,34 @@
-# Pokemon Market Backend
+# Pokemon Market Backend v3
 
-This backend uses the real APIs you specified:
-
-- `https://api.pokemontcg.io/v2`
-- `https://pokeapi.co/api/v2`
+Uses the real APIs:
+- https://api.pokemontcg.io/v2
+- https://pokeapi.co/api/v2
 
 ## Routes
+- /api/search?q=charizard
+- /api/radar
+- /api/analytics
+- /api/education
+- /api/education/pikachu
+- /api/analyzer?q=charizard
 
-- `/api/search?q=charizard`
-- `/api/radar`
-- `/api/analytics`
-- `/api/education`
-- `/api/education/pikachu`
+## AI analyzer restore
+The analyzer now returns:
+- aiScore
+- aiLabel
+- recommendation
+- reasoning
+- riskLevel
+- gradingOutlook
+- liquidityNote
+- trendNote
+- dailyChange
+- weeklyChange
+- monthlyChange
 
-## Notes
+## Analyzer depth
+Default:
+- 5 pages
+- 50 cards per page
 
-- `POKEMONTCG_API_KEY` is optional but recommended.
-- The backend is Render-ready.
-- Your frontend should point to this Render service URL.
+That means the analyzer scans up to 250 cards by default.
