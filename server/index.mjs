@@ -1,158 +1,31 @@
 import express from 'express'
 import dotenv from 'dotenv'
-import cors from 'cors'
+import path from 'path'
+import { fileURLToPath } from 'url'
+import fs from 'fs'
 
 dotenv.config()
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const rootDir = path.resolve(__dirname, '..')
+const distDir = path.join(rootDir, 'dist')
 
 const app = express()
 const port = process.env.PORT || 8787
 const pokemonApiBase = 'https://api.pokemontcg.io/v2'
-const pokeApiBase = 'https://pokeapi.co/api/v2'
-
-const allowedExactOrigins = new Set([
-  'https://pokeinvest.tritownrevival.org',
-  'https://www.pokeinvest.tritownrevival.org',
-  'https://tritownrevival.org',
-  'https://www.tritownrevival.org',
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-])
-
-function isAllowedOrigin(origin) {
-  if (!origin) return true
-
-  if (allowedExactOrigins.has(origin)) return true
-
-  try {
-    const url = new URL(origin)
-    const host = url.hostname.toLowerCase()
-
-    if (host === 'tritownrevival.org' || host.endsWith('.tritownrevival.org')) {
-      return true
-    }
-
-    if (host.endsWith('.dreamhosters.com')) {
-      return true
-    }
-
-    return false
-  } catch {
-    return false
-  }
-}
-
-const corsOptions = {
-  origin(origin, callback) {
-    if (isAllowedOrigin(origin)) {
-      callback(null, true)
-    } else {
-      callback(new Error(`CORS blocked for origin: ${origin}`))
-    }
-  },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}
-
-app.use(cors(corsOptions))
-app.options('*', cors(corsOptions))
-app.use(express.json())
-
-const fallbackSets = []
-
-const fallbackCards = [
-  {
-    id: 'sv3pt5-199',
-    name: 'Charizard ex',
-    number: '199',
-    rarity: 'Special Illustration Rare',
-    set: { id: 'sv3pt5', name: 'Scarlet & Violet 151', releaseDate: '2023/09/22' },
-    tcgplayer: {
-      updatedAt: '2026/04/19',
-      prices: { holofoil: { low: 495, mid: 585, high: 775, market: 550, directLow: 560 } },
-    },
-    images: { small: 'https://images.pokemontcg.io/sv3pt5/199.png' },
-  },
-  {
-    id: 'swsh7-215',
-    name: 'Umbreon VMAX',
-    number: '215',
-    rarity: 'Rare Secret',
-    set: { id: 'swsh7', name: 'Evolving Skies', releaseDate: '2021/08/27' },
-    tcgplayer: {
-      updatedAt: '2026/04/19',
-      prices: { holofoil: { low: 1160, mid: 1375, high: 1800, market: 1299, directLow: 1305 } },
-    },
-    images: { small: 'https://images.pokemontcg.io/swsh7/215.png' },
-  },
-  {
-    id: 'pgo-10',
-    name: 'Mewtwo VSTAR',
-    number: '31',
-    rarity: 'Rare Holo VSTAR',
-    set: { id: 'pgo', name: 'Pokémon GO', releaseDate: '2022/07/01' },
-    tcgplayer: {
-      updatedAt: '2026/04/19',
-      prices: { holofoil: { low: 42, mid: 49, high: 75, market: 46, directLow: 45 } },
-    },
-    images: { small: 'https://images.pokemontcg.io/pgo/31.png' },
-  },
-]
-
-const pokemonAliasMap = {
-  'farfetchd': 'farfetchd',
-  "farfetch'd": 'farfetchd',
-  'sirfetchd': 'sirfetchd',
-  "sirfetch'd": 'sirfetchd',
-  'mrmime': 'mr-mime',
-  'mr mime': 'mr-mime',
-  'mimejr': 'mime-jr',
-  'mime jr': 'mime-jr',
-  'typenull': 'type-null',
-  'type null': 'type-null',
-  'nidoranf': 'nidoran-f',
-  'nidoran f': 'nidoran-f',
-  'nidoranm': 'nidoran-m',
-  'nidoran m': 'nidoran-m',
-  'hooh': 'ho-oh',
-  'porygonz': 'porygon-z',
-  'jangmoo': 'jangmo-o',
-  'hakamoo': 'hakamo-o',
-  'kommoo': 'kommo-o',
-  'greattusk': 'great-tusk',
-  'slitherwing': 'slither-wing',
-  'sandyshocks': 'sandy-shocks',
-  'ironhands': 'iron-hands',
-  'ironbundle': 'iron-bundle',
-  'ironthorns': 'iron-thorns',
-  'roaringmoon': 'roaring-moon',
-  'walkingwake': 'walking-wake',
-  'ragingbolt': 'raging-bolt',
-  'ironcrown': 'iron-crown',
-  'ironboulder': 'iron-boulder',
-  'ironleaves': 'iron-leaves',
-  'wochien': 'wo-chien',
-  'chienpao': 'chien-pao',
-  'tinglu': 'ting-lu',
-  'chiyu': 'chi-yu',
-  'wo-chien': 'wo-chien',
-  'chien-pao': 'chien-pao',
-  'ting-lu': 'ting-lu',
-  'chi-yu': 'chi-yu',
-}
+const setCache = { value: null, expiresAt: 0 }
+const searchCache = new Map()
 
 function getHeaders() {
   const headers = { Accept: 'application/json' }
-  if (process.env.POKEMONTCG_API_KEY) {
-    headers['X-Api-Key'] = process.env.POKEMONTCG_API_KEY
-  }
+  if (process.env.POKEMONTCG_API_KEY) headers['X-Api-Key'] = process.env.POKEMONTCG_API_KEY
   return headers
 }
 
-async function safeJson(url, headers = {}) {
-  const response = await fetch(url, { headers })
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`)
-  }
+async function safeJson(url) {
+  const response = await fetch(url, { headers: getHeaders() })
+  if (!response.ok) throw new Error(`Request failed: ${response.status}`)
   return response.json()
 }
 
@@ -161,43 +34,58 @@ function parseDate(value) {
   return new Date(String(value).replace(/\//g, '-')).getTime()
 }
 
+function formatDate(value) {
+  if (!value) return null
+  const date = new Date(String(value).replace(/\//g, '-'))
+  if (Number.isNaN(date.getTime())) return null
+  return date.toISOString()
+}
+
 function daysSinceRelease(value) {
   const then = parseDate(value)
   if (!then) return 9999
-  const diffMs = Date.now() - then
-  return Math.max(0, Math.round(diffMs / 86400000))
+  return Math.max(0, Math.round((Date.now() - then) / 86400000))
 }
 
 function getPrimaryPrice(card) {
   const prices = card?.tcgplayer?.prices || {}
-  const preferredKeys = [
-    'holofoil',
-    'normal',
-    'reverseHolofoil',
-    '1stEditionHolofoil',
-    'unlimitedHolofoil',
-    'reverse',
-  ]
-
+  const preferredKeys = ['holofoil', 'normal', 'reverseHolofoil', '1stEditionHolofoil', 'unlimitedHolofoil', 'reverse']
   for (const key of preferredKeys) {
-    if (prices[key]?.market) return { variant: key, ...prices[key] }
+    const p = prices[key]
+    if (p && (p.market || p.mid || p.low || p.high)) return { variant: key, ...p }
   }
-
   for (const [key, value] of Object.entries(prices)) {
-    if (value?.market || value?.mid || value?.low) return { variant: key, ...value }
+    if (value && (value.market || value.mid || value.low || value.high)) return { variant: key, ...value }
   }
-
   return null
+}
+
+function deriveTrendFlags(pricing = {}) {
+  const market = Number(pricing.market || 0)
+  const low = Number(pricing.low || 0)
+  const mid = Number(pricing.mid || 0)
+  const high = Number(pricing.high || 0)
+  if (!market) return { momentum: 'unknown', spreadPct: null, premiumVsMidPct: null }
+  const spreadPct = low ? Number((((market - low) / market) * 100).toFixed(1)) : null
+  const premiumVsMidPct = mid ? Number((((market - mid) / mid) * 100).toFixed(1)) : null
+  let momentum = 'flat'
+  if (premiumVsMidPct !== null) {
+    if (premiumVsMidPct >= 8) momentum = 'breaking out'
+    else if (premiumVsMidPct >= 2) momentum = 'firm'
+    else if (premiumVsMidPct <= -8) momentum = 'soft'
+    else if (premiumVsMidPct <= -2) momentum = 'slipping'
+  }
+  return { momentum, spreadPct, premiumVsMidPct, upsideToHighPct: high ? Number((((high - market) / market) * 100).toFixed(1)) : null }
 }
 
 function scoreCard(card) {
   const pricing = getPrimaryPrice(card)
   const rarity = String(card.rarity || '').toLowerCase()
-  const market = pricing?.market || 0
-  const mid = pricing?.mid || pricing?.market || pricing?.low || 0
-  const low = pricing?.low || 0
-  const high = pricing?.high || mid
-  const directLow = pricing?.directLow || pricing?.directLowPrice || 0
+  const market = Number(pricing?.market || 0)
+  const mid = Number(pricing?.mid || pricing?.market || pricing?.low || 0)
+  const low = Number(pricing?.low || 0)
+  const high = Number(pricing?.high || mid)
+  const directLow = Number(pricing?.directLow || pricing?.directLowPrice || 0)
   const days = daysSinceRelease(card?.set?.releaseDate)
 
   let score = 40
@@ -213,7 +101,7 @@ function scoreCard(card) {
   } else if (market >= 15) {
     score += 4
   } else {
-    risks.push('Low market price usually means thin upside unless demand accelerates.')
+    risks.push('Low market price usually means thinner upside unless demand accelerates.')
   }
 
   if (/illustration rare|special illustration rare|alternate art|alt art|secret/.test(rarity)) {
@@ -226,20 +114,20 @@ function scoreCard(card) {
 
   if (days >= 30 && days <= 240) {
     score += 12
-    reasons.push('The card is past launch chaos but still early in its market life.')
+    reasons.push('Past launch chaos but still early in the market cycle.')
   } else if (days < 30) {
     score -= 6
-    risks.push('Very new releases can be distorted by pre-release hype and low supply.')
+    risks.push('Very new releases can be distorted by early hype and tight supply.')
   } else if (days > 800) {
     score += 5
-    reasons.push('Older supply can tighten if the card stays relevant.')
+    reasons.push('Older supply can tighten when the card stays relevant.')
   }
 
   if (mid > 0 && market > 0) {
     const marketVsMid = market / mid
     if (marketVsMid >= 0.9 && marketVsMid <= 1.1) {
       score += 7
-      reasons.push('Market price is lining up with the broader ask range instead of looking broken.')
+      reasons.push('Market price lines up with broader ask levels instead of looking broken.')
     }
   }
 
@@ -247,19 +135,16 @@ function scoreCard(card) {
     const spread = (market - low) / market
     if (spread <= 0.18) {
       score += 6
-      reasons.push('Low-to-market spread is fairly tight, which can mean healthier pricing.')
+      reasons.push('Tighter low-to-market spread suggests healthier pricing.')
     } else if (spread >= 0.35) {
       score -= 8
       risks.push('Wide low-to-market spread can mean fragile pricing or undercut pressure.')
     }
   }
 
-  if (high > 0 && market > 0) {
-    const hypeGap = (high - market) / market
-    if (hypeGap >= 0.5) {
-      score -= 5
-      risks.push('Large gap between high and market can signal hype listings above the real market.')
-    }
+  if (high > 0 && market > 0 && (high - market) / market >= 0.5) {
+    score -= 5
+    risks.push('Large gap between high and market can signal hype listings above the real market.')
   }
 
   if (directLow > 0 && directLow >= market * 0.96) {
@@ -275,9 +160,10 @@ function scoreCard(card) {
   score = Math.max(0, Math.min(100, Math.round(score)))
 
   let verdict = 'Watch'
-  if (score >= 78) verdict = 'Strong hold candidate'
-  else if (score >= 62) verdict = 'Possible hold'
-  else if (score <= 42) verdict = 'Probably not a hold'
+  if (score >= 80) verdict = 'Buy'
+  else if (score >= 67) verdict = 'Hold'
+  else if (score >= 48) verdict = 'Watch'
+  else verdict = 'Sell'
 
   return {
     score,
@@ -285,219 +171,204 @@ function scoreCard(card) {
     reasons: reasons.slice(0, 4),
     risks: risks.slice(0, 3),
     pricing,
+    trend: deriveTrendFlags(pricing || {}),
     daysSinceRelease: days,
   }
 }
 
-function sortSetsNewestFirst(sets) {
-  return [...sets].sort((a, b) => parseDate(b.releaseDate) - parseDate(a.releaseDate))
-}
-
-async function fetchRecentSets(limit = 8) {
-  try {
-    const data = await safeJson(`${pokemonApiBase}/sets?pageSize=50&orderBy=-releaseDate`, getHeaders())
-    return sortSetsNewestFirst(data.data || []).slice(0, limit)
-  } catch {
-    return fallbackSets
+function slimSet(set) {
+  return {
+    id: set.id,
+    name: set.name,
+    series: set.series,
+    printedTotal: set.printedTotal,
+    total: set.total,
+    releaseDate: set.releaseDate,
+    updatedAt: set.updatedAt,
+    symbol: set.images?.symbol || null,
+    logo: set.images?.logo || null,
   }
 }
 
-function classifySetStatus(releaseDate) {
-  const time = parseDate(releaseDate)
-  if (!time) return 'unknown'
-  return time > Date.now() ? 'upcoming' : 'released'
-}
-
-async function fetchCardsForSet(setId, pageSize = 40) {
-  try {
-    const query = encodeURIComponent(`set.id:${setId}`)
-    const select = encodeURIComponent('id,name,number,rarity,set,images,tcgplayer')
-    const data = await safeJson(`${pokemonApiBase}/cards?q=${query}&pageSize=${pageSize}&orderBy=-set.releaseDate&select=${select}`, getHeaders())
-    return data.data || []
-  } catch {
-    return fallbackCards.filter((card) => card.set.id === setId)
+function slimCard(card) {
+  const primary = getPrimaryPrice(card)
+  return {
+    id: card.id,
+    name: card.name,
+    number: card.number,
+    rarity: card.rarity || null,
+    artist: card.artist || null,
+    hp: card.hp || null,
+    supertype: card.supertype || null,
+    subtypes: card.subtypes || [],
+    types: card.types || [],
+    images: card.images || {},
+    set: card.set ? {
+      id: card.set.id,
+      name: card.set.name,
+      series: card.set.series,
+      releaseDate: card.set.releaseDate,
+      total: card.set.total,
+      printedTotal: card.set.printedTotal,
+      symbol: card.set.images?.symbol || null,
+      logo: card.set.images?.logo || null,
+    } : null,
+    tcgplayer: card.tcgplayer || null,
+    primaryPrice: primary,
+    ai: scoreCard(card),
   }
 }
 
-function pickTopCandidates(cards, max = 6) {
-  return cards
-    .map((card) => ({ ...card, model: scoreCard(card) }))
-    .sort((a, b) => {
-      const aHasPricing = a.model.pricing ? 1 : 0
-      const bHasPricing = b.model.pricing ? 1 : 0
-      if (bHasPricing !== aHasPricing) return bHasPricing - aHasPricing
-      return b.model.score - a.model.score || ((b.model.pricing?.market || 0) - (a.model.pricing?.market || 0))
-    })
-    .slice(0, max)
-}
+async function fetchAllSets() {
+  if (setCache.value && Date.now() < setCache.expiresAt) return setCache.value
+  const pageSize = 250
+  let page = 1
+  let totalCount = Infinity
+  const sets = []
 
-function normalizePokemonName(input) {
-  const cleaned = String(input || '')
-    .replace(/\b(ex|gx|vmax|vstar|v-union|v|tag team|radiant|shiny|delta|break|lv\.?x|star)\b/gi, ' ')
-    .replace(/[♀]/g, ' f')
-    .replace(/[♂]/g, ' m')
-    .replace(/[^a-zA-Z0-9' -]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase()
-
-  if (!cleaned) return ''
-
-  const key = cleaned.replace(/['\-.\s]/g, '')
-  if (pokemonAliasMap[key]) return pokemonAliasMap[key]
-  if (pokemonAliasMap[cleaned]) return pokemonAliasMap[cleaned]
-
-  const words = cleaned.split(' ')
-  if (words.length > 1) {
-    const first = words[0]
-    const firstKey = first.replace(/['\-.\s]/g, '')
-    if (pokemonAliasMap[firstKey]) return pokemonAliasMap[firstKey]
-    return first
+  while (sets.length < totalCount && page <= 6) {
+    const data = await safeJson(`${pokemonApiBase}/sets?page=${page}&pageSize=${pageSize}&orderBy=-releaseDate`)
+    totalCount = Number(data.totalCount || data.data?.length || 0)
+    sets.push(...(data.data || []))
+    if (!data.data?.length) break
+    page += 1
   }
 
-  return cleaned
+  const deduped = Array.from(new Map(sets.map((set) => [set.id, set])).values())
+  const sorted = deduped.sort((a, b) => parseDate(b.releaseDate) - parseDate(a.releaseDate))
+  setCache.value = sorted
+  setCache.expiresAt = Date.now() + 1000 * 60 * 60
+  return sorted
 }
 
-function titleCase(value) {
-  return String(value || '')
-    .split(/[-\s]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ')
+async function fetchCardsPage(query, page = 1, pageSize = 250, orderBy = '-set.releaseDate,name,number') {
+  const select = encodeURIComponent('id,name,number,rarity,artist,hp,supertype,subtypes,types,set,images,tcgplayer')
+  const url = `${pokemonApiBase}/cards?q=${encodeURIComponent(query)}&page=${page}&pageSize=${pageSize}&orderBy=${encodeURIComponent(orderBy)}&select=${select}`
+  return safeJson(url)
 }
 
-function extractEvolutionChain(chainNode, bucket = []) {
-  if (!chainNode?.species?.name) return bucket
-  bucket.push(titleCase(chainNode.species.name))
-  for (const child of chainNode.evolves_to || []) extractEvolutionChain(child, bucket)
-  return bucket
-}
+async function fetchCardsMultiPage(query, { pageSize = 250, maxPages = 6, orderBy = '-set.releaseDate,name,number' } = {}) {
+  const cacheKey = JSON.stringify({ query, pageSize, maxPages, orderBy })
+  const cached = searchCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
 
-async function fetchPokemonEnrichment(term) {
-  const pokemonName = normalizePokemonName(term)
-  if (!pokemonName) return null
+  let page = 1
+  let totalCount = Infinity
+  const cards = []
 
-  try {
-    const pokemon = await safeJson(`${pokeApiBase}/pokemon/${encodeURIComponent(pokemonName)}`)
-    const species = await safeJson(pokemon.species.url)
-    const evolution = species.evolution_chain?.url ? await safeJson(species.evolution_chain.url) : null
-
-    return {
-      lookup: pokemonName,
-      profile: {
-        id: pokemon.id,
-        name: titleCase(pokemon.name),
-        sprite: pokemon.sprites?.other?.['official-artwork']?.front_default || pokemon.sprites?.front_default || null,
-        heightMeters: pokemon.height ? pokemon.height / 10 : null,
-        weightKg: pokemon.weight ? pokemon.weight / 10 : null,
-        baseExperience: pokemon.base_experience || null,
-        types: (pokemon.types || []).map((entry) => titleCase(entry.type.name)),
-        abilities: (pokemon.abilities || []).map((entry) => ({
-          name: titleCase(entry.ability.name.replace(/-/g, ' ')),
-          hidden: !!entry.is_hidden,
-        })),
-        stats: (pokemon.stats || []).map((entry) => ({
-          name: titleCase(entry.stat.name.replace(/special-/g, 'sp. ')),
-          base: entry.base_stat,
-        })),
-        generation: species.generation?.name ? titleCase(species.generation.name.replace('generation-', 'Gen ')) : null,
-        habitat: species.habitat?.name ? titleCase(species.habitat.name) : null,
-        captureRate: species.capture_rate ?? null,
-        color: species.color?.name ? titleCase(species.color.name) : null,
-        evolves: evolution?.chain ? extractEvolutionChain(evolution.chain, []) : [],
-      },
-    }
-  } catch {
-    return null
+  while (cards.length < totalCount && page <= maxPages) {
+    const data = await fetchCardsPage(query, page, pageSize, orderBy)
+    totalCount = Number(data.totalCount || data.data?.length || 0)
+    cards.push(...(data.data || []))
+    if (!data.data?.length) break
+    page += 1
   }
+
+  const deduped = Array.from(new Map(cards.map((card) => [card.id, card])).values())
+  const value = deduped
+  searchCache.set(cacheKey, { value, expiresAt: Date.now() + 1000 * 60 * 15 })
+  return value
 }
+
+function buildSearchQuery(term) {
+  const normalized = term.trim().replace(/"/g, '')
+  const escaped = normalized.replace(/'/g, "\\'")
+  const exact = `name:"${escaped}"`
+  const prefix = `name:${escaped}*`
+  const setMatch = `set.name:"${escaped}"`
+  const numberMatch = /^\d+[a-zA-Z-]*$/.test(normalized) ? `number:${escaped}` : null
+  return [exact, prefix, setMatch, numberMatch].filter(Boolean).join(' OR ')
+}
+
+function sortByAiAndPrice(cards) {
+  return [...cards].sort((a, b) => {
+    const scoreDelta = (b.ai?.score || 0) - (a.ai?.score || 0)
+    if (scoreDelta) return scoreDelta
+    return (b.primaryPrice?.market || 0) - (a.primaryPrice?.market || 0)
+  })
+}
+
+app.use(express.json())
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true })
 })
 
-app.get('/api/release-radar', async (_req, res) => {
-  const sets = await fetchRecentSets(8)
-  const cardsBySet = await Promise.all(
-    sets.map(async (set) => {
-      const cards = await fetchCardsForSet(set.id, 40)
-      return {
-        set: { ...set, status: classifySetStatus(set.releaseDate) },
-        candidates: pickTopCandidates(cards, 5),
-      }
-    }),
-  )
-
-  const usedFallback = sets.length === 0
-  res.json({
-    source: usedFallback ? 'fallback cards only' : 'pokemontcg.io live data',
-    generatedAt: new Date().toISOString(),
-    fallback: usedFallback,
-    sets: cardsBySet,
-  })
-})
-
-app.get('/api/card-search', async (req, res) => {
-  const term = String(req.query.q || '').trim()
-  if (!term) return res.status(400).json({ error: 'Missing q query parameter.' })
-
+app.get('/api/sets', async (req, res) => {
   try {
-    const query = encodeURIComponent(`name:"${term}" OR name:${term}`)
-    const select = encodeURIComponent('id,name,number,rarity,set,images,tcgplayer')
-    const data = await safeJson(`${pokemonApiBase}/cards?q=${query}&pageSize=24&orderBy=-set.releaseDate&select=${select}`, getHeaders())
-    const results = (data.data || [])
-      .map((card) => ({ ...card, model: scoreCard(card) }))
-      .sort((a, b) => {
-        const aHasPricing = a.model.pricing ? 1 : 0
-        const bHasPricing = b.model.pricing ? 1 : 0
-        if (bHasPricing !== aHasPricing) return bHasPricing - aHasPricing
-        return b.model.score - a.model.score
-      })
-
-    res.json({ results, pokemonLookup: normalizePokemonName(term) || null })
-  } catch {
-    const results = fallbackCards
-      .filter((card) => card.name.toLowerCase().includes(term.toLowerCase()))
-      .map((card) => ({ ...card, model: scoreCard(card) }))
-    res.json({ results, fallback: true, pokemonLookup: normalizePokemonName(term) || null })
+    const allSets = await fetchAllSets()
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 250)))
+    res.json({
+      generatedAt: new Date().toISOString(),
+      total: allSets.length,
+      sets: allSets.slice(0, limit).map(slimSet),
+    })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load sets.', details: error.message })
   }
 })
 
-app.get('/api/pokemon-enrich', async (req, res) => {
+app.get('/api/sets/:setId/cards', async (req, res) => {
+  try {
+    const { setId } = req.params
+    const limit = Math.min(250, Math.max(1, Number(req.query.limit || 60)))
+    const cards = await fetchCardsMultiPage(`set.id:${setId}`, { pageSize: 250, maxPages: 8, orderBy: 'number,name' })
+    const enriched = sortByAiAndPrice(cards.filter((card) => getPrimaryPrice(card)).map(slimCard))
+    res.json({ setId, total: enriched.length, cards: enriched.slice(0, limit) })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load set cards.', details: error.message })
+  }
+})
+
+app.get('/api/home', async (_req, res) => {
+  try {
+    const sets = (await fetchAllSets()).slice(0, 36).map(slimSet)
+    const newestSetIds = sets.slice(0, 8).map((set) => set.id)
+    const cardsBySet = await Promise.all(newestSetIds.map((setId) => fetchCardsMultiPage(`set.id:${setId}`, { pageSize: 100, maxPages: 3 })))
+    const movers = sortByAiAndPrice(cardsBySet.flat().filter((card) => getPrimaryPrice(card)).map(slimCard)).slice(0, 18)
+    res.json({ generatedAt: new Date().toISOString(), sets, movers })
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to load home data.', details: error.message })
+  }
+})
+
+app.get('/api/search', async (req, res) => {
   const term = String(req.query.q || '').trim()
   if (!term) return res.status(400).json({ error: 'Missing q query parameter.' })
-
-  const enrichment = await fetchPokemonEnrichment(term)
-  if (!enrichment) return res.status(404).json({ error: 'No PokéAPI species matched that search.' })
-  res.json({ source: 'pokeapi.co', generatedAt: new Date().toISOString(), ...enrichment })
-})
-
-app.get('/api/predict', async (req, res) => {
-  const term = String(req.query.q || '').trim()
-  let card = null
-
-  if (term) {
-    try {
-      const query = encodeURIComponent(`name:"${term}" OR name:${term}`)
-      const select = encodeURIComponent('id,name,number,rarity,set,images,tcgplayer')
-      const data = await safeJson(`${pokemonApiBase}/cards?q=${query}&pageSize=10&orderBy=-set.releaseDate&select=${select}`, getHeaders())
-      card = (data.data || [])[0] || null
-    } catch {
-      card = fallbackCards.find((entry) => entry.name.toLowerCase().includes(term.toLowerCase())) || null
-    }
+  try {
+    const cards = await fetchCardsMultiPage(buildSearchQuery(term), { pageSize: 250, maxPages: 8 })
+    const results = sortByAiAndPrice(cards.filter((card) => getPrimaryPrice(card)).map(slimCard)).slice(0, 500)
+    res.json({ query: term, total: results.length, results })
+  } catch (error) {
+    res.status(500).json({ error: 'Search failed.', details: error.message })
   }
-
-  if (!card) return res.status(404).json({ error: 'No card matched that search.' })
-
-  const enrichment = await fetchPokemonEnrichment(card.name)
-  res.json({
-    card,
-    pokemon: enrichment?.profile || null,
-    model: scoreCard(card),
-    generatedAt: new Date().toISOString(),
-  })
 })
+
+app.get('/api/analyze', async (req, res) => {
+  const term = String(req.query.q || '').trim()
+  if (!term) return res.status(400).json({ error: 'Missing q query parameter.' })
+  try {
+    const cards = await fetchCardsMultiPage(buildSearchQuery(term), { pageSize: 250, maxPages: 6 })
+    const results = sortByAiAndPrice(cards.filter((card) => getPrimaryPrice(card)).map(slimCard)).slice(0, 50)
+    res.json({
+      query: term,
+      total: results.length,
+      best: results[0] || null,
+      results,
+    })
+  } catch (error) {
+    res.status(500).json({ error: 'AI analysis failed.', details: error.message })
+  }
+})
+
+if (fs.existsSync(distDir)) {
+  app.use(express.static(distDir))
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next()
+    res.sendFile(path.join(distDir, 'index.html'))
+  })
+}
 
 app.listen(port, () => {
-  console.log(`Pokemon Market AI server running on http://localhost:${port}`)
+  console.log(`Pokemon Market server running on http://localhost:${port}`)
 })
